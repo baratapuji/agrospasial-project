@@ -1,0 +1,299 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  admin
+  seller
+  buyer
+}
+
+enum AccountStatus {
+  pending
+  active
+  suspended
+}
+
+enum AssetType {
+  POINT
+  POLYGON
+}
+
+enum OrderStatus {
+  pending
+  paid
+  shipped
+  completed
+  canceled
+}
+
+// Tambahkan Enum untuk Badge / Tier Toko
+enum TierType {
+  SILVER
+  GOLD
+  LUXURY
+}
+
+// ==========================================
+// MODUL 1: IDENTITY & ACCESS MANAGEMENT (IAM)
+// ==========================================
+
+model User {
+  id                  String             @id @default(uuid())
+  email               String             @unique
+  password_hash       String
+  role                Role               @default(buyer)
+  status_akun         AccountStatus      @default(active)
+  reset_token         String?
+  reset_token_expires DateTime?
+  refresh_token       String?
+  created_at          DateTime           @default(now())
+  
+  profile             UserProfile?
+  addresses           UserAddress[]
+  shops               Shop[]
+  orders              Order[]
+  cart_sessions       CartSession[]
+  reviews             Review[]
+  notifications       Notification[]
+  admin_logs          AdminActivityLog[]
+}
+
+model UserProfile {
+  id         String @id @default(uuid())
+  user_id    String @unique
+  full_name  String
+  phone      String
+  avatar_url String?
+  
+  user       User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model UserAddress {
+  id             String  @id @default(uuid())
+  user_id        String
+  label          String
+  recipient_name String
+  full_address   String
+  latitude       Decimal
+  longitude      Decimal
+  is_primary     Boolean @default(false)
+  
+  user           User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+// ==========================================
+// MODUL 2: MITRA & SPATIAL (CORE WEBGIS)
+// ==========================================
+
+model Shop {
+  id               String       @id @default(uuid())
+  owner_id         String       @unique
+  owner            User         @relation(fields: [owner_id], references: [id])
+  name             String
+  description      String?
+  banner_url       String?      // Khusus Luxury / kustomisasi toko
+  is_verified      Boolean      @default(false)
+  wallet_balance   Decimal      @default(0.00)
+  tier_purchases   TierPurchase[]
+  
+  onboarding_step  Int          @default(1)
+  tier             TierType     @default(SILVER)
+  commission_rate  Float        @default(0.05) // Silver: 5%, Gold: 3%, Luxury: 1.5%
+  
+  created_at       DateTime     @default(now())
+  updated_at       DateTime     @updatedAt
+
+  spatial_assets   SpatialAsset[]
+  products         Product[]
+  orders           Order[]
+}
+
+model SpatialAsset {
+  id            String    @id @default(uuid())
+  shop_id       String
+  asset_type    AssetType
+  geom          Json      // Menyimpan data GeoJSON (Point/Polygon)
+  area_hectares Decimal?
+  
+  shop          Shop      @relation(fields: [shop_id], references: [id], onDelete: Cascade)
+}
+
+// ==========================================
+// MODUL 3: KATALOG & INVENTORI KOMODITAS
+// ==========================================
+
+model Category {
+  id       String    @id @default(uuid())
+  name     String
+  slug     String    @unique
+  icon_url String?
+  created_at DateTime  @default(now())
+  
+  products Product[]
+}
+
+model Product {
+id           String   @id @default(uuid())
+  shop_id      String
+  shop         Shop     @relation(fields: [shop_id], references: [id], onDelete: Cascade)
+  category_id  String
+  category     Category @relation(fields: [category_id], references: [id])
+  name         String
+  slug         String   @unique
+  description  String?
+  price        Decimal
+  unit_type    String
+  weight_grams Int      @default(1000)
+  stock        Int
+  is_active    Boolean  @default(true)
+  is_highlight Boolean  @default(false) // Penanda produk unggulan/highlight
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  
+  snapshots    ProductSnapshot[]
+  cart_items   CartItem[]
+  order_items  OrderItem[]
+}
+
+model ProductSnapshot {
+  id             String   @id @default(uuid())
+  product_id     String
+  name_snapshot  String
+  price_snapshot Decimal
+  recorded_at    DateTime @default(now())
+  
+  product        Product  @relation(fields: [product_id], references: [id], onDelete: Cascade)
+}
+
+// ==========================================
+// MODUL 4: TRANSAKSI & INTEGRASI E-COMMERCE
+// ==========================================
+
+model CartSession {
+  id            String   @id @default(uuid())
+  session_token String   @unique
+  user_id       String?
+  expires_at    DateTime
+  
+  user          User?    @relation(fields: [user_id], references: [id], onDelete: SetNull)
+  items         CartItem[]
+}
+
+model CartItem {
+  id              String      @id @default(uuid())
+  cart_session_id String
+  product_id      String
+  qty             Int
+  
+  cart_session    CartSession @relation(fields: [cart_session_id], references: [id], onDelete: Cascade)
+  product         Product     @relation(fields: [product_id], references: [id], onDelete: Cascade)
+}
+
+model Order {
+  id                   String      @id @default(uuid())
+  order_number         String      @unique
+  user_id              String?
+  shop_id              String
+  guest_email          String?
+  guest_phone          String?
+  total_amount         Decimal
+  platform_fee         Decimal
+  shipping_distance_km Decimal
+  tracking_number      String?
+  status               OrderStatus @default(pending)
+  created_at           DateTime    @default(now())
+  
+  user                 User?       @relation(fields: [user_id], references: [id], onDelete: SetNull)
+  shop                 Shop        @relation(fields: [shop_id], references: [id], onDelete: Cascade)
+  items                OrderItem[]
+  payment              Payment?
+}
+
+model OrderItem {
+  id           String  @id @default(uuid())
+  order_id     String
+  product_id   String
+  qty          Int
+  locked_price Decimal
+  subtotal     Decimal
+  
+  order        Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product      Product @relation(fields: [product_id], references: [id])
+  review       Review?
+}
+
+model Payment {
+  id              String  @id @default(uuid())
+  order_id        String  @unique
+  midtrans_id     String? @unique
+  snap_token      String?
+  payment_method  String?
+  gross_amount    Decimal
+  status          String  @default("pending")
+  webhook_payload Json?
+  
+  order           Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
+}
+
+// ==========================================
+// MODUL 5: INTERAKSI, CMS & BACK-OFFICE ADMIN
+// ==========================================
+
+model Review {
+  id            String   @id @default(uuid())
+  order_item_id String   @unique
+  user_id       String
+  rating        Int
+  comment       String?
+  created_at    DateTime @default(now())
+  
+  order_item    OrderItem @relation(fields: [order_item_id], references: [id], onDelete: Cascade)
+  user          User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  user_id    String
+  type       String
+  message    String
+  is_read    Boolean  @default(false)
+  created_at DateTime @default(now())
+  
+  user       User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model TierPurchase {
+  id         String   @id @default(uuid())
+  order_id   String   @unique
+  shop_id    String
+  user_id    String
+  tier       TierType
+  amount     Decimal
+  status     String   @default("pending") // pending | paid | failed
+  snap_token String?
+  created_at DateTime @default(now())
+
+  shop       Shop     @relation(fields: [shop_id], references: [id], onDelete: Cascade)
+}
+
+model AppSetting {
+  id            String @id @default(uuid())
+  setting_key   String @unique
+  setting_value String
+}
+
+model AdminActivityLog {
+  id         String   @id @default(uuid())
+  admin_id   String
+  action     String
+  target_id  String?
+  created_at DateTime @default(now())
+  
+  admin      User     @relation(fields: [admin_id], references: [id], onDelete: Cascade)
+}
