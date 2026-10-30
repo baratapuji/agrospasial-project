@@ -287,4 +287,4 @@ Lakukan pembayaran dari frontend, selesaikan lewat **Midtrans Payment Simulator*
 
 ## Lisensi
 
-Tentukan lisensi proyek di sini (misalnya MIT) atau hapus bagian ini jika belum ditentukan.
+MIT License @B
