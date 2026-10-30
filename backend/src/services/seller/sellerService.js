@@ -7,6 +7,20 @@ const TIER_LIMITS = {
   LUXURY: { maxProducts: 12, maxHighlights: 6 },
 };
 
+const fail = (message, statusCode) => Object.assign(new Error(message), { statusCode });
+
+// Ambil toko milik user TANPA cek onboarding (dipakai saat onboarding & simpan spasial)
+const getShopByUserId = (userId) =>
+  prisma.shop.findUnique({ where: { owner_id: userId } });
+
+// Status ringkas untuk halaman onboarding (null jika toko belum dibuat)
+const getOnboardingStatus = (userId) =>
+  prisma.shop.findUnique({
+    where: { owner_id: userId },
+    select: { id: true, name: true, description: true, tier: true, onboarding_step: true },
+  });
+
+// Dashboard penuh: hanya untuk toko yang onboarding-nya sudah selesai
 const getSellerShopByUserId = async (userId) => {
   const shop = await prisma.shop.findUnique({
     where: { owner_id: userId },
@@ -19,14 +33,10 @@ const getSellerShopByUserId = async (userId) => {
     },
   });
 
-  if (!shop) {
-    throw new Error('Toko belum terdaftar.');
-  }
+  if (!shop) throw fail('Toko belum terdaftar.', 404);
 
-  // Jika onboarding belum selesai (kurang dari step 4), lempar error / status khusus
   if (shop.onboarding_step < 4) {
-    const error = new Error('Anda harus menyelesaikan proses onboarding dan memilih paket tier terlebih dahulu.');
-    error.statusCode = 403;
+    const error = fail('Anda harus menyelesaikan proses onboarding dan memilih paket tier terlebih dahulu.', 403);
     error.onboardingIncomplete = true;
     throw error;
   }
@@ -34,27 +44,23 @@ const getSellerShopByUserId = async (userId) => {
   return shop;
 };
 
-// Langkah 1: Simpan / Update Profil Toko Saat Onboarding Awal
+// Langkah 1: Simpan / Update Profil Toko
 const createShopOnboarding = async (userId, data) => {
-  // Cek apakah toko sudah dibuat sebelumnya saat register
-  const existingShop = await prisma.shop.findUnique({
-    where: { owner_id: userId },
-  });
+  const existingShop = await prisma.shop.findUnique({ where: { owner_id: userId } });
 
   if (existingShop) {
-    // Jika toko sudah ada, lakukan update nama & deskripsi
-    return await prisma.shop.update({
-      where: { owner_id: userId },
+    return prisma.shop.update({
+      where: { id: existingShop.id },
       data: {
         name: data.name,
         description: data.description,
-        onboarding_step: 2, // Lanjut ke tahap pilih tier
+        // jangan mundurkan langkah jika sudah lebih jauh
+        onboarding_step: Math.max(existingShop.onboarding_step, 2),
       },
     });
   }
 
-  // Jika belum ada, buat record shop baru
-  return await prisma.shop.create({
+  return prisma.shop.create({
     data: {
       owner_id: userId,
       name: data.name,
@@ -66,29 +72,43 @@ const createShopOnboarding = async (userId, data) => {
   });
 };
 
-// Langkah 2: Update Tier Toko (Silver / Gold / Luxury)
-const updateShopTier = async (shopId, tierType) => {
-  let fee = 0.05;
-  if (tierType === 'GOLD') fee = 0.03;
-  if (tierType === 'LUXURY') fee = 0.015;
+// Langkah 2 (gratis): hanya SILVER yang boleh dipilih tanpa bayar.
+// Tier GOLD/LUXURY aktif otomatis lewat pembayaran Midtrans (webhook / tier sync).
+const updateShopTier = async (userId, tierType) => {
+  if (tierType !== 'SILVER') {
+    throw fail('Paket berbayar hanya aktif setelah pembayaran berhasil.', 403);
+  }
 
-  return await prisma.shop.update({
-    where: { id: shopId },
+  const shop = await prisma.shop.findUnique({ where: { owner_id: userId } });
+  if (!shop) throw fail('Toko belum terdaftar.', 404);
+  if (shop.onboarding_step < 2) throw fail('Lengkapi profil toko terlebih dahulu.', 400);
+  if (shop.tier !== 'SILVER') throw fail('Paket berbayar sudah aktif untuk toko ini.', 409);
+
+  return prisma.shop.update({
+    where: { id: shop.id },
     data: {
-      tier: tierType,
-      commission_rate: fee,
-      onboarding_step: 3, // Lanjut ke tahap gambar peta spasial
+      tier: 'SILVER',
+      commission_rate: 0.05,
+      onboarding_step: Math.max(shop.onboarding_step, 3),
     },
   });
 };
 
-// Langkah 3: Selesaikan Onboarding Peta Spasial
-const completeOnboarding = async (shopId) => {
-  return await prisma.shop.update({
-    where: { id: shopId },
-    data: {
-      onboarding_step: 4, // Selesai / Menunggu Verifikasi Admin
-    },
+// Langkah 3: Selesaikan onboarding (menunggu verifikasi admin)
+const completeOnboarding = async (userId) => {
+  const shop = await prisma.shop.findUnique({ where: { owner_id: userId } });
+  if (!shop) throw fail('Toko belum terdaftar.', 404);
+  if (shop.onboarding_step >= 4) return shop; // sudah selesai
+  if (shop.onboarding_step < 3) throw fail('Selesaikan langkah sebelumnya terlebih dahulu.', 403);
+
+  const pointCount = await prisma.spatialAsset.count({
+    where: { shop_id: shop.id, asset_type: 'POINT' },
+  });
+  if (pointCount === 0) throw fail('Tentukan titik lokasi toko terlebih dahulu.', 400);
+
+  return prisma.shop.update({
+    where: { id: shop.id },
+    data: { onboarding_step: 4 },
   });
 };
 
@@ -99,24 +119,22 @@ const createProductWithTierCheck = async (shopId, data) => {
     include: { products: true },
   });
 
-  if (!shop) throw new Error('Toko tidak ditemukan.');
+  if (!shop) throw fail('Toko tidak ditemukan.', 404);
 
   const limits = TIER_LIMITS[shop.tier] || TIER_LIMITS.SILVER;
 
-  // Cek batas jumlah produk
   if (shop.products.length >= limits.maxProducts) {
-    throw new Error(`Batas maksimal produk untuk tier ${shop.tier} adalah ${limits.maxProducts} produk.`);
+    throw fail(`Batas maksimal produk untuk tier ${shop.tier} adalah ${limits.maxProducts} produk.`, 400);
   }
 
-  // Cek batas produk highlight
   if (data.isHighlight) {
-    const currentHighlights = shop.products.filter(p => p.is_highlight).length;
+    const currentHighlights = shop.products.filter((p) => p.is_highlight).length;
     if (currentHighlights >= limits.maxHighlights) {
-      throw new Error(`Batas maksimal produk highlight untuk tier ${shop.tier} adalah ${limits.maxHighlights} produk.`);
+      throw fail(`Batas maksimal produk highlight untuk tier ${shop.tier} adalah ${limits.maxHighlights} produk.`, 400);
     }
   }
 
-  return await prisma.product.create({
+  return prisma.product.create({
     data: {
       shop_id: shopId,
       category_id: data.categoryId,
@@ -134,18 +152,34 @@ const createProductWithTierCheck = async (shopId, data) => {
 };
 
 // Simpan Aset Spasial oleh Seller
+// POINT hanya satu per toko: simpan ulang akan menggantikan titik lama (aman saat retry).
 const saveSellerSpatialAsset = async (shopId, assetType, geom, areaHectares) => {
-  return await prisma.spatialAsset.create({
+  if (!['POINT', 'POLYGON'].includes(assetType)) throw fail('Tipe aset spasial tidak valid.', 400);
+  if (!geom || typeof geom !== 'object') throw fail('Data geometri tidak valid.', 400);
+
+  const create = prisma.spatialAsset.create({
     data: {
       shop_id: shopId,
-      asset_type: assetType, // 'POINT' atau 'POLYGON'
-      geom: geom,
+      asset_type: assetType,
+      geom,
       area_hectares: areaHectares ? parseFloat(areaHectares) : null,
     },
   });
+
+  if (assetType === 'POINT') {
+    const [, asset] = await prisma.$transaction([
+      prisma.spatialAsset.deleteMany({ where: { shop_id: shopId, asset_type: 'POINT' } }),
+      create,
+    ]);
+    return asset;
+  }
+
+  return create;
 };
 
 module.exports = {
+  getShopByUserId,
+  getOnboardingStatus,
   getSellerShopByUserId,
   createShopOnboarding,
   updateShopTier,

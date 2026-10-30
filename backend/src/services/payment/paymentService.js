@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const midtransClient = require('midtrans-client');
 const prisma = require('../../config/prisma');
 const { TIERS } = require('../../config/tiers');
+const { syncTierPurchases } = require('./webhookService');
 
 const snap = new midtransClient.Snap({
   isProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true',
@@ -53,4 +54,12 @@ const createTierTransaction = async (shopId, tierType, user) => {
   return { orderId, snapToken: transaction.token, redirectUrl: transaction.redirect_url };
 };
 
-module.exports = { createTierTransaction };
+const syncTier = async (shopId, user) => {
+  const shop = await prisma.shop.findUnique({ where: { id: shopId } });
+  if (!shop) throw fail('Toko tidak ditemukan.', 404);
+  const userId = user.id ?? user.userId ?? user.sub;
+  if (user.role !== 'admin' && shop.owner_id !== userId) throw fail('Bukan toko milikmu.', 403);
+  await syncTierPurchases(shopId);
+};
+
+module.exports = { createTierTransaction, syncTier };

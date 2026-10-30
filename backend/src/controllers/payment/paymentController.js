@@ -1,5 +1,5 @@
 const paymentService = require('../../services/payment/paymentService');
-const { handleMidtransNotification } = require('../../services/payment/WebhookService');
+const { handleMidtransNotification } = require('../../services/payment/webhookService');
 const { successResponse, errorResponse } = require('../../utils/response');
 
 const createTierCharge = async (req, res, next) => {
@@ -19,6 +19,15 @@ const createTierCharge = async (req, res, next) => {
   }
 };
 
+const syncTier = async (req, res, next) => {
+  try {
+    await paymentService.syncTier(req.body.shopId, req.user);
+    return successResponse(res, 'Status pembayaran disinkronkan.', null);
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Webhook Midtrans (route publik, tanpa authenticateToken)
 const midtransNotification = async (req, res, next) => {
   try {
@@ -29,4 +38,4 @@ const midtransNotification = async (req, res, next) => {
   }
 };
 
-module.exports = { createTierCharge, midtransNotification };
+module.exports = { createTierCharge, syncTier, midtransNotification };
